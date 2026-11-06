@@ -285,21 +285,26 @@
     }
   }
 
-  function startRecording() {
-    if (!recordDestination || !window.MediaRecorder) return;
+  async function startRecording() {
+    if (!recordDestination || !window.MediaRecorder) { recordStatusEl.textContent = 'Recording is unavailable in this browser.'; return; }
+    try { await audioContext.resume(); } catch (err) { recordStatusEl.textContent = 'Could not start audio: ' + (err.message || err); return; }
     recordedChunks = [];
     if (recordingUrl) { URL.revokeObjectURL(recordingUrl); recordingUrl = null; }
     recordPlayback.hidden = true;
     recordDownload.hidden = true;
     try {
-      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+      const candidates = ['audio/mp4;codecs=mp4a.40.2','audio/mp4','audio/webm;codecs=opus','audio/webm'];
+      const mime = candidates.find(type => MediaRecorder.isTypeSupported(type));
       mediaRecorder = new MediaRecorder(recordDestination.stream, mime ? {mimeType:mime} : undefined);
+      mediaRecorder.onerror = event => { recordStatusEl.textContent = 'Recording error: ' + (event.error && event.error.message ? event.error.message : 'Safari could not encode the audio.'); };
       mediaRecorder.ondataavailable = event => { if (event.data && event.data.size) recordedChunks.push(event.data); };
       mediaRecorder.onstop = () => {
         const type = mediaRecorder.mimeType || 'audio/webm';
         const blob = new Blob(recordedChunks, {type});
+        if (!blob.size) { recordStatusEl.textContent = 'The recording was empty. Keep the microphone running and try again in Safari.'; return; }
         recordingUrl = URL.createObjectURL(blob);
         recordPlayback.src = recordingUrl;
+        recordPlayback.load();
         recordPlayback.hidden = false;
         recordDownload.href = recordingUrl;
         recordDownload.download = 'hand-tracker-vocal-recording.' + (type.includes('mp4') ? 'm4a' : 'webm');
@@ -307,7 +312,7 @@
         recordDownload.hidden = false;
         recordStatusEl.textContent = 'Recording saved here. Press play to listen or download it.';
       };
-      mediaRecorder.start();
+      mediaRecorder.start(250);
       recordStartBtn.disabled = true;
       recordStopBtn.disabled = false;
       recordStatusEl.textContent = 'Recording the processed vocal audio…';
