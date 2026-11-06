@@ -122,6 +122,7 @@
   let lastGesture = '';
   let gestureSince = 0;
   let micStream = null, audioContext = null, analyser = null, pitchFrame = 0;
+  let pitchShifter = null, micSource = null, outputGain = null;
 
   let camera = null;
   let tracker = null;
@@ -168,6 +169,34 @@
     }
     return names[((best % 12) + 12) % 12] + (Math.floor(best / 12) - 1);
   }
+  function noteNameToFrequency(noteName) {
+    const match = /^([A-G]#?)(-?\\d+)$/.exec(noteName);
+    if (!match) return 440;
+    const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const midi = (Number(match[2]) + 1) * 12 + names.indexOf(match[1]);
+    return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  async function createPitchShifter() {
+    if (!audioContext.audioWorklet) throw new Error('Live pitch correction is not supported by this browser. Please use the latest Safari.');
+    const workletCode = [
+      'class LivePitchShift extends AudioWorkletProcessor {',
+      ' constructor(){ super(); this.size=32768; this.buffer=new Float32Array(this.size); this.write=0; this.grains=[]; this.hop=1024; this.grain=2048; this.counter=0; this.ratio=1; this.port.onmessage=e=>{if(e.data.ratio) this.ratio=e.data.ratio;}; }',
+      ' process(inputs,outputs){ const input=inputs[0]; const output=outputs[0]; if(!input||!input[0]||!output||!output[0]) return true; const src=input[0], dst=output[0];',
+      ' for(let i=0;i<dst.length;i++){ const x=src[i]||0; this.buffer[this.write]=x; if(this.counter%this.hop===0) this.grains.push({start:(this.write-this.grain+this.size)%this.size,age:0}); let y=0,w=0;',
+      ' for(let g=this.grains.length-1;g>=0;g--){ const q=this.grains[g]; if(q.age>=this.grain){this.grains.splice(g,1);continue;} const phase=q.age/this.grain; const win=0.5-0.5*Math.cos(2*Math.PI*phase); const pos=(q.start+Math.floor(q.age*this.ratio))%this.size; y+=this.buffer[pos]*win; w+=win; q.age++; }',
+      ' dst[i]=w>0?y/w:0; this.write=(this.write+1)%this.size; this.counter++; } return true; }',
+      '} registerProcessor("live-pitch-shift",LivePitchShift);'
+    ].join('\n');
+    const blob = new Blob([workletCode], {type:'application/javascript'});
+    const url = URL.createObjectURL(blob);
+    try { await audioContext.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+    pitchShifter = new AudioWorkletNode(audioContext, 'live-pitch-shift');
+    outputGain = audioContext.createGain();
+    outputGain.gain.value = 1;
+    pitchShifter.connect(outputGain).connect(audioContext.destination);
+  }
+
   function updatePitch() {
     if (!analyser || !audioContext) return;
     const data = new Float32Array(analyser.fftSize);
@@ -176,6 +205,12 @@
     if (hz && hz >= 65 && hz <= 1000) {
       pitchNoteEl.textContent = autoTuneEnabled ? scalePitchName(hz) : frequencyToNote(hz);
       pitchFrequencyEl.textContent = Math.round(hz) + ' Hz';
+      if (pitchShifter) {
+        const targetHz = noteNameToFrequency(scalePitchName(hz));
+        const correction = autoTuneEnabled ? targetHz / hz : 1;
+        const strength = Number(tuneIntensityEl.value) / 100;
+        pitchShifter.port.postMessage({ratio: 1 + (correction - 1) * strength});
+      }
       pitchStatusEl.textContent = autoTuneEnabled ? 'Tuning mode is on — showing the nearest note in ' + tuneKeyEl.value + ' major.' : 'Pitch detected — hold a steady note for the most stable reading.';
     } else {
       pitchNoteEl.textContent = '—';
@@ -189,6 +224,7 @@
     pitchFrame = 0;
     if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
     if (audioContext) { try { await audioContext.close(); } catch (_) {} audioContext = null; }
+    pitchShifter = null; micSource = null; outputGain = null;
     analyser = null;
     micStartBtn.disabled = false;
     micStopBtn.disabled = true;
@@ -213,7 +249,10 @@
       analyser = audioContext.createAnalyser();
       analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = 0;
-      audioContext.createMediaStreamSource(micStream).connect(analyser);
+      micSource = audioContext.createMediaStreamSource(micStream);
+      micSource.connect(analyser);
+      await createPitchShifter();
+      micSource.connect(pitchShifter);
       micStopBtn.disabled = false;
       pitchStatusEl.textContent = 'Microphone active. Listening for a sung or played note…';
       updatePitch();
