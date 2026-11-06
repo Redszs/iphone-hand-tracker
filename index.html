@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d16">
+  <title>Live Hand Tracker</title>
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; background:#090d16; color:#f4f7ff; }
+    main { width:min(900px,100%); margin:auto; padding:22px 16px 34px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+    h1 { font-size:clamp(22px,5vw,30px); margin:0; letter-spacing:-.7px; }
+    .status { display:flex; align-items:center; gap:8px; color:#b9c4d8; font-size:13px; }
+    .dot { width:9px; height:9px; border-radius:50%; background:#e5a33b; }
+    .dot.live { background:#36d88b; box-shadow:0 0 12px #36d88b88; }
+    .stage { position:relative; overflow:hidden; border:1px solid #263247; border-radius:20px; background:#03060b; aspect-ratio:4/3; }
+    video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    video { transform:scaleX(-1); }
+    canvas { pointer-events:none; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; padding:24px; text-align:center; color:#9aa8bf; line-height:1.5; }
+    .controls { display:flex; flex-wrap:wrap; gap:10px; margin:15px 0; }
+    button { border:1px solid #35435b; border-radius:12px; padding:12px 16px; color:#f4f7ff; background:#182236; font-weight:650; font-size:14px; }
+    button.primary { background:#4169e1; border-color:#4169e1; }
+    button:disabled { opacity:.55; }
+    .stats { display:flex; flex-wrap:wrap; gap:10px; }
+    .stat { flex:1; min-width:130px; padding:14px; background:#111a2a; border:1px solid #263247; border-radius:14px; }
+    .stat strong { display:block; font-size:23px; margin-top:4px; }
+    .stat span { color:#9eacc3; font-size:12px; }
+    .note { color:#9eacc3; font-size:13px; line-height:1.5; margin-top:16px; }
+    .error { color:#ffb4a9; white-space:pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Live Hand Tracker</h1>
+    <div class="status"><i class="dot" id="dot"></i><span id="status">Camera not started</span></div>
+  </header>
+
+  <section class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <div class="empty" id="empty">Tap <b>Start camera</b> and allow camera access to see your hand tracked live.</div>
+  </section>
+
+  <div class="controls">
+    <button class="primary" id="start">Start camera</button>
+    <button id="switch" disabled>Switch camera</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+
+  <section class="stats">
+    <div class="stat"><span>Hands detected</span><strong id="hands">0</strong></div>
+    <div class="stat"><span>Tracked landmarks</span><strong id="landmarks">0 / 21</strong></div>
+    <div class="stat"><span>Frame rate</span><strong id="fps">—</strong></div>
+  </section>
+  <p class="note">For iPhone: open this page in Safari over HTTPS, tap Start camera, and allow access. Keep your hand well lit and fully in view. Camera access generally will not work from an ordinary insecure HTTP page.</p>
+  <p class="note error" id="error" role="alert"></p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  const startBtn = document.getElementById('start');
+  const stopBtn = document.getElementById('stop');
+  const switchBtn = document.getElementById('switch');
+  const statusEl = document.getElementById('status');
+  const dot = document.getElementById('dot');
+  const empty = document.getElementById('empty');
+  const errorEl = document.getElementById('error');
+  const handsEl = document.getElementById('hands');
+  const landmarksEl = document.getElementById('landmarks');
+  const fpsEl = document.getElementById('fps');
+
+  let camera = null;
+  let tracker = null;
+  let facingMode = 'user';
+  let running = false;
+  let lastFrame = 0;
+  let frameCount = 0;
+  let fpsStart = performance.now();
+
+  function setStatus(text, live=false) {
+    statusEl.textContent = text;
+    dot.classList.toggle('live', live);
+  }
+
+  function sizeCanvas() {
+    const w = video.videoWidth || 640;
+    const h = video.videoHeight || 480;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+
+  function onResults(results) {
+    if (!running) return;
+    sizeCanvas();
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const detected = results.multiHandLandmarks || [];
+    handsEl.textContent = String(detected.length);
+    const count = detected.length ? detected[0].length : 0;
+    landmarksEl.textContent = `${count} / 21`;
+
+    for (const points of detected) {
+      // The selfie preview is mirrored, so mirror the drawing too.
+      const mirrored = points.map(p => ({x: 1-p.x, y:p.y, z:p.z}));
+      drawConnectors(ctx, mirrored, HAND_CONNECTIONS, {color:'#45d9ff', lineWidth:4});
+      drawLandmarks(ctx, mirrored, {color:'#8cff9b', lineWidth:1, radius:4});
+    }
+    ctx.restore();
+
+    frameCount++;
+    const now = performance.now();
+    if (now - fpsStart >= 1000) {
+      fpsEl.textContent = String(Math.round(frameCount * 1000 / (now - fpsStart)));
+      frameCount = 0;
+      fpsStart = now;
+    }
+    if (detected.length) {
+      setStatus('Tracking', true);
+      empty.style.display = 'none';
+    } else {
+      setStatus('Looking for a hand…', true);
+      empty.style.display = 'none';
+    }
+    lastFrame = now;
+  }
+
+  async function stopCamera() {
+    running = false;
+    if (camera) {
+      try { camera.stop(); } catch (_) {}
+      camera = null;
+    }
+    if (tracker) {
+      try { await tracker.close(); } catch (_) {}
+      tracker = null;
+    }
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
+      video.srcObject = null;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    handsEl.textContent = '0';
+    landmarksEl.textContent = '0 / 21';
+    fpsEl.textContent = '—';
+    empty.style.display = 'grid';
+    setStatus('Camera stopped');
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    switchBtn.disabled = true;
+  }
+
+  async function startCamera() {
+    errorEl.textContent = '';
+    startBtn.disabled = true;
+    setStatus('Starting camera…');
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Camera access requires Safari/Chrome and a secure HTTPS connection.');
+      }
+      if (typeof Hands === 'undefined' || typeof Camera === 'undefined') {
+        throw new Error('The hand-tracking library did not load. Check your internet connection and reload.');
+      }
+
+      tracker = new Hands({locateFile: file =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+      tracker.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.65,
+        minTrackingConfidence: 0.6
+      });
+      tracker.onResults(onResults);
+
+      camera = new Camera(video, {
+        onFrame: async () => {
+          if (running && tracker) await tracker.send({image: video});
+        },
+        width: 1280,
+        height: 720,
+        facingMode
+      });
+      await camera.start();
+      running = true;
+      stopBtn.disabled = false;
+      switchBtn.disabled = false;
+      setStatus('Camera active', true);
+    } catch (err) {
+      await stopCamera();
+      errorEl.textContent = err?.message || String(err);
+      setStatus('Could not start camera');
+    }
+  }
+
+  startBtn.addEventListener('click', startCamera);
+  stopBtn.addEventListener('click', stopCamera);
+  switchBtn.addEventListener('click', async () => {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    await stopCamera();
+    await startCamera();
+  });
+  window.addEventListener('pagehide', () => {
+    if (camera) { try { camera.stop(); } catch (_) {} }
+  });
+})();
+</script>
+</body>
+</html>
