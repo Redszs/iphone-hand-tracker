@@ -197,13 +197,16 @@
     if (!audioContext.audioWorklet) throw new Error('Live pitch correction is not supported by this browser. Please use the latest Safari.');
     const workletCode = [
       'class LivePitchShift extends AudioWorkletProcessor {',
-      ' constructor(){ super(); this.size=32768; this.buffer=new Float32Array(this.size); this.write=0; this.grains=[]; this.hop=1024; this.grain=2048; this.counter=0; this.ratio=1; this.port.onmessage=e=>{if(e.data.ratio) this.ratio=e.data.ratio;}; }',
-      ' process(inputs,outputs){ const input=inputs[0]; const output=outputs[0]; if(!input||!input[0]||!output||!output[0]) return true; const src=input[0], dst=output[0];',
-      ' for(let i=0;i<dst.length;i++){ const x=src[i]||0; this.buffer[this.write]=x; if(this.counter%this.hop===0) this.grains.push({start:(this.write-this.grain+this.size)%this.size,age:0}); let y=0,w=0;',
-      ' for(let g=this.grains.length-1;g>=0;g--){ const q=this.grains[g]; if(q.age>=this.grain){this.grains.splice(g,1);continue;} const phase=q.age/this.grain; const win=0.5-0.5*Math.cos(2*Math.PI*phase); const pos=(q.start+Math.floor(q.age*this.ratio))%this.size; y+=this.buffer[pos]*win; w+=win; q.age++; }',
+      ' constructor(){ super(); this.size=65536; this.buffer=new Float32Array(this.size); this.write=0; this.grains=[]; this.hop=1024; this.grain=4096; this.counter=0; this.ratio=1; this.targetRatio=1; this.port.onmessage=e=>{const r=Number(e.data.ratio); if(Number.isFinite(r)) this.targetRatio=Math.max(0.5,Math.min(2,r));}; }',
+      ' process(inputs,outputs){ const input=inputs[0], output=outputs[0]; if(!input||!input[0]||!output||!output[0]) return true; const src=input[0], dst=output[0];',
+      ' for(let i=0;i<dst.length;i++){ const x=src[i]||0; this.buffer[this.write]=x; this.ratio+=(this.targetRatio-this.ratio)*0.0025;',
+      ' if(this.counter%this.hop===0) this.grains.push({start:(this.write-this.grain*2+this.size)%this.size,age:0});',
+      ' let y=0,w=0; for(let g=this.grains.length-1;g>=0;g--){ const q=this.grains[g]; if(q.age>=this.grain){this.grains.splice(g,1);continue;}',
+      ' const phase=q.age/this.grain, win=0.5-0.5*Math.cos(2*Math.PI*phase), offset=Math.floor(q.age*this.ratio);',
+      ' const pos=(q.start+offset)%this.size; y+=this.buffer[pos]*win; w+=win; q.age++; }',
       ' dst[i]=w>0?y/w:0; this.write=(this.write+1)%this.size; this.counter++; } return true; }',
       '} registerProcessor("live-pitch-shift",LivePitchShift);'
-    ].join('\n');
+    ].join('\\n');
     const blob = new Blob([workletCode], {type:'application/javascript'});
     const url = URL.createObjectURL(blob);
     try { await audioContext.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
