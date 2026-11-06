@@ -30,6 +30,12 @@
     .stat span { color:#9eacc3; font-size:12px; }
     .note { color:#9eacc3; font-size:13px; line-height:1.5; margin-top:16px; }
     .error { color:#ffb4a9; white-space:pre-wrap; }
+    .harmonizer { margin-top:16px; padding:16px; background:#111a2a; border:1px solid #263247; border-radius:16px; }
+    .harmonizer h2 { margin:0 0 8px; font-size:18px; }
+    .pitch-readout { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:12px 0; }
+    .pitch-note { font-size:38px; font-weight:750; letter-spacing:-1px; }
+    .pitch-frequency { color:#9eacc3; font-size:14px; }
+    .pitch-help { color:#9eacc3; font-size:13px; line-height:1.5; margin:8px 0 0; }
   </style>
 </head>
 <body>
@@ -58,6 +64,20 @@
   </section>
   <p class="note">For iPhone: open this page in Safari over HTTPS, tap Start camera, and allow access. Keep your hand well lit and fully in view. Camera access generally will not work from an ordinary insecure HTTP page.</p>
   <p class="note error" id="error" role="alert"></p>
+  <section class="harmonizer" aria-labelledby="harmonizer-title">
+    <h2 id="harmonizer-title">Audio pitch detector</h2>
+    <p class="pitch-help">Allow microphone access, then sing or play a note. Your detected note and frequency will appear here.</p>
+    <div class="controls">
+      <button class="primary" id="micStart">Start microphone</button>
+      <button id="micStop" disabled>Stop microphone</button>
+    </div>
+    <div class="pitch-readout" aria-live="polite">
+      <span class="pitch-note" id="pitchNote">—</span>
+      <span class="pitch-frequency" id="pitchFrequency">Waiting for microphone</span>
+    </div>
+    <p class="pitch-help" id="pitchStatus">Microphone is off. Camera and hand tracking work independently.</p>
+    <p class="note error" id="micError" role="alert"></p>
+  </section>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -78,6 +98,13 @@
   const handsEl = document.getElementById('hands');
   const landmarksEl = document.getElementById('landmarks');
   const fpsEl = document.getElementById('fps');
+  const micStartBtn = document.getElementById('micStart');
+  const micStopBtn = document.getElementById('micStop');
+  const pitchNoteEl = document.getElementById('pitchNote');
+  const pitchFrequencyEl = document.getElementById('pitchFrequency');
+  const pitchStatusEl = document.getElementById('pitchStatus');
+  const micErrorEl = document.getElementById('micError');
+  let micStream = null, audioContext = null, analyser = null, pitchFrame = 0;
 
   let camera = null;
   let tracker = null;
@@ -86,6 +113,82 @@
   let lastFrame = 0;
   let frameCount = 0;
   let fpsStart = performance.now();
+
+
+  function frequencyToNote(frequency) {
+    const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
+    const names = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+    return names[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
+  }
+  function detectPitch(buffer, sampleRate) {
+    let rms = 0;
+    for (let i = 0; i < buffer.length; i++) rms += buffer[i] * buffer[i];
+    if (Math.sqrt(rms / buffer.length) < 0.012) return null;
+    let bestLag = -1, bestCorrelation = 0;
+    const minLag = Math.floor(sampleRate / 1000);
+    const maxLag = Math.min(Math.floor(sampleRate / 65), buffer.length - 1);
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let correlation = 0;
+      for (let i = 0; i < buffer.length - lag; i++) correlation += buffer[i] * buffer[i + lag];
+      correlation /= buffer.length - lag;
+      if (correlation > bestCorrelation) { bestCorrelation = correlation; bestLag = lag; }
+    }
+    return bestLag > 0 && bestCorrelation > 0.01 ? sampleRate / bestLag : null;
+  }
+  function updatePitch() {
+    if (!analyser || !audioContext) return;
+    const data = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(data);
+    const hz = detectPitch(data, audioContext.sampleRate);
+    if (hz && hz >= 65 && hz <= 1000) {
+      pitchNoteEl.textContent = frequencyToNote(hz);
+      pitchFrequencyEl.textContent = Math.round(hz) + ' Hz';
+      pitchStatusEl.textContent = 'Pitch detected — hold a steady note for the most stable reading.';
+    } else {
+      pitchNoteEl.textContent = '—';
+      pitchFrequencyEl.textContent = 'No clear pitch';
+      pitchStatusEl.textContent = 'Listening… try singing or humming a steady note.';
+    }
+    pitchFrame = requestAnimationFrame(updatePitch);
+  }
+  async function stopMicrophone() {
+    if (pitchFrame) cancelAnimationFrame(pitchFrame);
+    pitchFrame = 0;
+    if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
+    if (audioContext) { try { await audioContext.close(); } catch (_) {} audioContext = null; }
+    analyser = null;
+    micStartBtn.disabled = false;
+    micStopBtn.disabled = true;
+    pitchNoteEl.textContent = '—';
+    pitchFrequencyEl.textContent = 'Waiting for microphone';
+    pitchStatusEl.textContent = 'Microphone is off. Camera and hand tracking work independently.';
+  }
+  async function startMicrophone() {
+    micErrorEl.textContent = '';
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      micErrorEl.textContent = 'Microphone access requires HTTPS and a supported browser.';
+      return;
+    }
+    micStartBtn.disabled = true;
+    pitchStatusEl.textContent = 'Requesting microphone permission…';
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) throw new Error('Web Audio is not supported in this browser.');
+      audioContext = new AudioContextClass();
+      await audioContext.resume();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 4096;
+      analyser.smoothingTimeConstant = 0;
+      audioContext.createMediaStreamSource(micStream).connect(analyser);
+      micStopBtn.disabled = false;
+      pitchStatusEl.textContent = 'Microphone active. Listening for a sung or played note…';
+      updatePitch();
+    } catch (err) {
+      await stopMicrophone();
+      micErrorEl.textContent = err && err.message ? err.message : String(err);
+    }
+  }
 
   function setStatus(text, live=false) {
     statusEl.textContent = text;
@@ -203,6 +306,8 @@
     }
   }
 
+  micStartBtn.addEventListener('click', startMicrophone);
+  micStopBtn.addEventListener('click', stopMicrophone);
   startBtn.addEventListener('click', startCamera);
   stopBtn.addEventListener('click', stopCamera);
   switchBtn.addEventListener('click', async () => {
