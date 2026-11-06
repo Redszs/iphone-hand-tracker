@@ -206,7 +206,7 @@
       ' const pos=(q.start+offset)%this.size; y+=this.buffer[pos]*win; w+=win; q.age++; }',
       ' dst[i]=w>0?y/w:0; this.write=(this.write+1)%this.size; this.counter++; } return true; }',
       '} registerProcessor("live-pitch-shift",LivePitchShift);'
-    ].join('\\n');
+    ].join('\n');
     const blob = new Blob([workletCode], {type:'application/javascript'});
     const url = URL.createObjectURL(blob);
     try { await audioContext.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
