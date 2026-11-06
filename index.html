@@ -40,6 +40,9 @@
     .tune-controls label { display:grid; gap:7px; color:#c6d1e4; font-size:13px; }
     .tune-controls select,.tune-controls input { width:100%; }
     .gesture-state { padding:10px 12px; margin-top:10px; border-radius:10px; background:#202b40; color:#c6d1e4; font-size:13px; }
+    .record-controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    #recordPlayback { width:100%; margin-top:12px; }
+    #recordDownload { display:inline-block; margin-top:10px; color:#8bdcff; }
     .gesture-state.active { background:#123c32; color:#8ff0c0; }
   </style>
 </head>
@@ -86,6 +89,13 @@
       <label>Effect intensity <input id="tuneIntensity" type="range" min="0" max="100" value="85"><span id="intensityValue">85%</span></label>
     </div>
     <div class="gesture-state" id="gestureState">Show an open palm to enable tuning mode; make a fist to disable it.</div>
+    <div class="record-controls">
+      <button class="primary" id="recordStart" disabled>Start recording</button>
+      <button id="recordStop" disabled>Stop recording</button>
+      <span id="recordStatus" class="pitch-help">Start the microphone before recording.</span>
+    </div>
+    <audio id="recordPlayback" controls hidden></audio>
+    <a id="recordDownload" hidden>Download recording</a>
     <p class="note error" id="micError" role="alert"></p>
   </section>
 </main>
@@ -118,11 +128,17 @@
   const tuneIntensityEl = document.getElementById('tuneIntensity');
   const intensityValueEl = document.getElementById('intensityValue');
   const gestureStateEl = document.getElementById('gestureState');
+  const recordStartBtn = document.getElementById('recordStart');
+  const recordStopBtn = document.getElementById('recordStop');
+  const recordStatusEl = document.getElementById('recordStatus');
+  const recordPlayback = document.getElementById('recordPlayback');
+  const recordDownload = document.getElementById('recordDownload');
   let autoTuneEnabled = false;
   let lastGesture = '';
   let gestureSince = 0;
   let micStream = null, audioContext = null, analyser = null, pitchFrame = 0;
   let pitchShifter = null, micSource = null, outputGain = null;
+  let recordDestination = null, mediaRecorder = null, recordedChunks = [], recordingUrl = null;
 
   let camera = null;
   let tracker = null;
@@ -194,7 +210,10 @@
     pitchShifter = new AudioWorkletNode(audioContext, 'live-pitch-shift');
     outputGain = audioContext.createGain();
     outputGain.gain.value = 1;
-    pitchShifter.connect(outputGain).connect(audioContext.destination);
+    pitchShifter.connect(outputGain);
+    outputGain.connect(audioContext.destination);
+    recordDestination = audioContext.createMediaStreamDestination();
+    outputGain.connect(recordDestination);
   }
 
   function updatePitch() {
@@ -224,7 +243,8 @@
     pitchFrame = 0;
     if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
     if (audioContext) { try { await audioContext.close(); } catch (_) {} audioContext = null; }
-    pitchShifter = null; micSource = null; outputGain = null;
+    pitchShifter = null; micSource = null; outputGain = null; recordDestination = null;
+    recordStartBtn.disabled = true;
     analyser = null;
     micStartBtn.disabled = false;
     micStopBtn.disabled = true;
@@ -254,11 +274,49 @@
       await createPitchShifter();
       micSource.connect(pitchShifter);
       micStopBtn.disabled = false;
+      recordStartBtn.disabled = !window.MediaRecorder || !recordDestination;
+      recordStatusEl.textContent = window.MediaRecorder ? 'Ready to record the processed audio.' : 'Recording is not supported in this browser.';
       pitchStatusEl.textContent = 'Microphone active. Listening for a sung or played note…';
       updatePitch();
     } catch (err) {
       await stopMicrophone();
       micErrorEl.textContent = err && err.message ? err.message : String(err);
+    }
+  }
+
+  function startRecording() {
+    if (!recordDestination || !window.MediaRecorder) return;
+    recordedChunks = [];
+    if (recordingUrl) { URL.revokeObjectURL(recordingUrl); recordingUrl = null; }
+    recordPlayback.hidden = true;
+    recordDownload.hidden = true;
+    try {
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+      mediaRecorder = new MediaRecorder(recordDestination.stream, mime ? {mimeType:mime} : undefined);
+      mediaRecorder.ondataavailable = event => { if (event.data && event.data.size) recordedChunks.push(event.data); };
+      mediaRecorder.onstop = () => {
+        const type = mediaRecorder.mimeType || 'audio/webm';
+        const blob = new Blob(recordedChunks, {type});
+        recordingUrl = URL.createObjectURL(blob);
+        recordPlayback.src = recordingUrl;
+        recordPlayback.hidden = false;
+        recordDownload.href = recordingUrl;
+        recordDownload.download = 'hand-tracker-vocal-recording.' + (type.includes('mp4') ? 'm4a' : 'webm');
+        recordDownload.textContent = 'Download recording';
+        recordDownload.hidden = false;
+        recordStatusEl.textContent = 'Recording saved here. Press play to listen or download it.';
+      };
+      mediaRecorder.start();
+      recordStartBtn.disabled = true;
+      recordStopBtn.disabled = false;
+      recordStatusEl.textContent = 'Recording the processed vocal audio…';
+    } catch (err) { recordStatusEl.textContent = 'Could not start recording: ' + (err.message || err); }
+  }
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+      recordStopBtn.disabled = true;
+      recordStartBtn.disabled = !recordDestination;
     }
   }
 
@@ -394,6 +452,8 @@
   }
 
   tuneIntensityEl.addEventListener('input', () => { intensityValueEl.textContent = tuneIntensityEl.value + '%'; });
+  recordStartBtn.addEventListener('click', startRecording);
+  recordStopBtn.addEventListener('click', stopRecording);
   micStartBtn.addEventListener('click', startMicrophone);
   micStopBtn.addEventListener('click', stopMicrophone);
   startBtn.addEventListener('click', startCamera);
