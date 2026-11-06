@@ -36,6 +36,11 @@
     .pitch-note { font-size:38px; font-weight:750; letter-spacing:-1px; }
     .pitch-frequency { color:#9eacc3; font-size:14px; }
     .pitch-help { color:#9eacc3; font-size:13px; line-height:1.5; margin:8px 0 0; }
+    .tune-controls { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+    .tune-controls label { display:grid; gap:7px; color:#c6d1e4; font-size:13px; }
+    .tune-controls select,.tune-controls input { width:100%; }
+    .gesture-state { padding:10px 12px; margin-top:10px; border-radius:10px; background:#202b40; color:#c6d1e4; font-size:13px; }
+    .gesture-state.active { background:#123c32; color:#8ff0c0; }
   </style>
 </head>
 <body>
@@ -76,6 +81,11 @@
       <span class="pitch-frequency" id="pitchFrequency">Waiting for microphone</span>
     </div>
     <p class="pitch-help" id="pitchStatus">Microphone is off. Camera and hand tracking work independently.</p>
+    <div class="tune-controls">
+      <label>Musical key<select id="tuneKey"><option value="C">C major</option><option value="C#">C♯ major</option><option value="D">D major</option><option value="D#">D♯ major</option><option value="E">E major</option><option value="F">F major</option><option value="F#">F♯ major</option><option value="G">G major</option><option value="G#">G♯ major</option><option value="A">A major</option><option value="A#">A♯ major</option><option value="B">B major</option></select></label>
+      <label>Effect intensity <input id="tuneIntensity" type="range" min="0" max="100" value="85"><span id="intensityValue">85%</span></label>
+    </div>
+    <div class="gesture-state" id="gestureState">Show an open palm to enable tuning mode; make a fist to disable it.</div>
     <p class="note error" id="micError" role="alert"></p>
   </section>
 </main>
@@ -104,6 +114,13 @@
   const pitchFrequencyEl = document.getElementById('pitchFrequency');
   const pitchStatusEl = document.getElementById('pitchStatus');
   const micErrorEl = document.getElementById('micError');
+  const tuneKeyEl = document.getElementById('tuneKey');
+  const tuneIntensityEl = document.getElementById('tuneIntensity');
+  const intensityValueEl = document.getElementById('intensityValue');
+  const gestureStateEl = document.getElementById('gestureState');
+  let autoTuneEnabled = false;
+  let lastGesture = '';
+  let gestureSince = 0;
   let micStream = null, audioContext = null, analyser = null, pitchFrame = 0;
 
   let camera = null;
@@ -140,15 +157,26 @@
     }
     return bestLag > 0 && bestScore > 0.35 ? sampleRate / bestLag : null;
   }
+  function scalePitchName(frequency) {
+    const names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const scales = {C:[0,2,4,5,7,9,11],"C#":[1,3,5,6,8,10,0],D:[2,4,6,7,9,11,1],"D#":[3,5,7,8,10,0,2],E:[4,6,8,9,11,1,3],F:[5,7,9,10,0,2,4],"F#":[6,8,10,11,1,3,5],G:[7,9,11,0,2,4,6],"G#":[8,10,0,1,3,5,7],A:[9,11,1,2,4,6,8],"A#":[10,0,2,3,5,7,9],B:[11,1,3,4,6,8,10]};
+    const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
+    const allowed = scales[tuneKeyEl.value] || scales.C;
+    let best = midi, distance = 99;
+    for (let candidate = midi - 1; candidate <= midi + 1; candidate++) {
+      if (allowed.includes(((candidate % 12) + 12) % 12) && Math.abs(candidate - midi) < distance) { best = candidate; distance = Math.abs(candidate - midi); }
+    }
+    return names[((best % 12) + 12) % 12] + (Math.floor(best / 12) - 1);
+  }
   function updatePitch() {
     if (!analyser || !audioContext) return;
     const data = new Float32Array(analyser.fftSize);
     analyser.getFloatTimeDomainData(data);
     const hz = detectPitch(data, audioContext.sampleRate);
     if (hz && hz >= 65 && hz <= 1000) {
-      pitchNoteEl.textContent = frequencyToNote(hz);
+      pitchNoteEl.textContent = autoTuneEnabled ? scalePitchName(hz) : frequencyToNote(hz);
       pitchFrequencyEl.textContent = Math.round(hz) + ' Hz';
-      pitchStatusEl.textContent = 'Pitch detected — hold a steady note for the most stable reading.';
+      pitchStatusEl.textContent = autoTuneEnabled ? 'Tuning mode is on — showing the nearest note in ' + tuneKeyEl.value + ' major.' : 'Pitch detected — hold a steady note for the most stable reading.';
     } else {
       pitchNoteEl.textContent = '—';
       pitchFrequencyEl.textContent = 'No clear pitch';
@@ -209,6 +237,20 @@
     }
   }
 
+  function updateHandGesture(points) {
+    if (!points) { lastGesture = ""; gestureSince = 0; gestureStateEl.textContent = "No hand detected — show an open palm or make a fist."; return; }
+    const fingerPairs = [[8,6],[12,10],[16,14],[20,18]];
+    const extended = fingerPairs.filter(pair => points[pair[0]].y < points[pair[1]].y - 0.035).length;
+    const gesture = extended >= 3 ? "open" : extended <= 1 ? "fist" : "uncertain";
+    if (gesture === "uncertain") { lastGesture = ""; gestureSince = 0; gestureStateEl.textContent = "Hand detected — open your palm or close it into a fist."; return; }
+    if (gesture !== lastGesture) { lastGesture = gesture; gestureSince = performance.now(); return; }
+    if (performance.now() - gestureSince > 250) {
+      autoTuneEnabled = gesture === "open";
+      gestureStateEl.classList.toggle("active", autoTuneEnabled);
+      gestureStateEl.textContent = autoTuneEnabled ? "OPEN PALM · TUNING MODE ON" : "FIST · TUNING MODE OFF";
+    }
+  }
+
   function onResults(results) {
     if (!running) return;
     sizeCanvas();
@@ -219,6 +261,7 @@
     const count = detected.length ? detected[0].length : 0;
     landmarksEl.textContent = `${count} / 21`;
 
+    updateHandGesture(detected[0]);
     for (const points of detected) {
       // The selfie preview is mirrored, so mirror the drawing too.
       const mirrored = points.map(p => ({x: 1-p.x, y:p.y, z:p.z}));
@@ -311,6 +354,7 @@
     }
   }
 
+  tuneIntensityEl.addEventListener('input', () => { intensityValueEl.textContent = tuneIntensityEl.value + '%'; });
   micStartBtn.addEventListener('click', startMicrophone);
   micStopBtn.addEventListener('click', stopMicrophone);
   startBtn.addEventListener('click', startCamera);
