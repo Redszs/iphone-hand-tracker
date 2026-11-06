@@ -121,19 +121,24 @@
     return names[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
   }
   function detectPitch(buffer, sampleRate) {
-    let rms = 0;
-    for (let i = 0; i < buffer.length; i++) rms += buffer[i] * buffer[i];
-    if (Math.sqrt(rms / buffer.length) < 0.012) return null;
-    let bestLag = -1, bestCorrelation = 0;
+    let energy = 0;
+    for (let i = 0; i < buffer.length; i++) energy += buffer[i] * buffer[i];
+    if (Math.sqrt(energy / buffer.length) < 0.008) return null;
+    let bestLag = -1, bestScore = 0;
     const minLag = Math.floor(sampleRate / 1000);
-    const maxLag = Math.min(Math.floor(sampleRate / 65), buffer.length - 1);
+    const maxLag = Math.min(Math.floor(sampleRate / 65), Math.floor(buffer.length / 2));
     for (let lag = minLag; lag <= maxLag; lag++) {
-      let correlation = 0;
-      for (let i = 0; i < buffer.length - lag; i++) correlation += buffer[i] * buffer[i + lag];
-      correlation /= buffer.length - lag;
-      if (correlation > bestCorrelation) { bestCorrelation = correlation; bestLag = lag; }
+      let cross = 0, leftEnergy = 0, rightEnergy = 0;
+      for (let i = 0; i < buffer.length - lag; i++) {
+        const x = buffer[i], y = buffer[i + lag];
+        cross += x * y;
+        leftEnergy += x * x;
+        rightEnergy += y * y;
+      }
+      const score = cross / Math.sqrt(leftEnergy * rightEnergy || 1);
+      if (score > bestScore) { bestScore = score; bestLag = lag; }
     }
-    return bestLag > 0 && bestCorrelation > 0.01 ? sampleRate / bestLag : null;
+    return bestLag > 0 && bestScore > 0.35 ? sampleRate / bestLag : null;
   }
   function updatePitch() {
     if (!analyser || !audioContext) return;
