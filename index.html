@@ -239,6 +239,7 @@
     pitchFrame = requestAnimationFrame(updatePitch);
   }
   async function stopMicrophone() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     if (pitchFrame) cancelAnimationFrame(pitchFrame);
     pitchFrame = 0;
     if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
