@@ -213,9 +213,8 @@
     pitchShifter.connect(outputGain);
     outputGain.connect(audioContext.destination);
     recordDestination = audioContext.createMediaStreamDestination();
-    // Record the direct microphone signal for reliable playback on mobile Safari.
-    // The live tuned monitor remains routed through outputGain separately.
-    micSource.connect(recordDestination);
+    // Record the processed signal so playback includes the live pitch effect.
+    outputGain.connect(recordDestination);
   }
 
   function updatePitch() {
@@ -317,7 +316,7 @@
       mediaRecorder.start(250);
       recordStartBtn.disabled = true;
       recordStopBtn.disabled = false;
-      recordStatusEl.textContent = 'Recording microphone audio…';
+      recordStatusEl.textContent = 'Recording tuned audio…';
     } catch (err) { recordStatusEl.textContent = 'Could not start recording: ' + (err.message || err); }
   }
   function stopRecording() {
